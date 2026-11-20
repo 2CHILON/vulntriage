@@ -1,5 +1,5 @@
 ---
-mode: agent
+agent: agent
 description: Phase 1 – unified model, SARIF parser, Postgres storage
 ---
 Implement Phase 1 only, following `.github/copilot-instructions.md`.
