@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vulntriage-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: vulntriage
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../orchestrator/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: orchestrator/Dockerfile
+    container_name: vulntriage-orchestrator
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/vulntriage
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
