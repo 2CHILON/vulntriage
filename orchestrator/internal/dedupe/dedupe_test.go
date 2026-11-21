@@ -1,6 +1,7 @@
 package dedupe
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -68,7 +69,7 @@ func TestExactMatchStrategy(t *testing.T) {
 			wantLen: 1,
 		},
 		{
-			name: "empty list returns empty",
+			name:     "empty list returns empty",
 			findings: []*model.Finding{},
 			wantLen:  0,
 		},
@@ -182,10 +183,10 @@ func TestCVEOnlyStrategy(t *testing.T) {
 
 func TestCanonicalSelection(t *testing.T) {
 	tests := []struct {
-		name        string
-		findings    []*model.Finding
-		wantSource  string
-		wantHasCVE  bool
+		name       string
+		findings   []*model.Finding
+		wantSource string
+		wantHasCVE bool
 	}{
 		{
 			name: "prefer CVE findings",
@@ -205,14 +206,14 @@ func TestCanonicalSelection(t *testing.T) {
 			wantSource: "trivy",
 			wantHasCVE: false,
 		},
-	{
-		name: "prefer longer descriptions",
-		findings: []*model.Finding{
-			makeTestFinding("f1", "trivy", "app.go", 42, "", "", "SQL Short"),
-			makeTestFinding("f2", "trivy", "app.go", 42, "", "", "SQL Short"),
+		{
+			name: "prefer longer descriptions",
+			findings: []*model.Finding{
+				makeTestFinding("f1", "trivy", "app.go", 42, "", "", "SQL Short"),
+				makeTestFinding("f2", "trivy", "app.go", 42, "", "", "SQL Short"),
+			},
+			wantSource: "trivy",
 		},
-		wantSource: "trivy",
-	},
 	}
 
 	for _, tt := range tests {
@@ -316,9 +317,9 @@ func TestStats(t *testing.T) {
 
 func TestGetStrategy(t *testing.T) {
 	tests := []struct {
-		name    string
+		name     string
 		strategy string
-		wantErr bool
+		wantErr  bool
 	}{
 		{"exact_match", "exact_match", false},
 		{"location_and_cve", "location_and_cve", false},
@@ -335,5 +336,150 @@ func TestGetStrategy(t *testing.T) {
 				t.Errorf("got error %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// FakeScannerForTesting implements the FindingStore interface for unit tests.
+type FakeScannerForTesting struct {
+	findings map[string][]model.Finding // scanID -> findings
+}
+
+func NewFakeScannerForTesting() *FakeScannerForTesting {
+	return &FakeScannerForTesting{
+		findings: make(map[string][]model.Finding),
+	}
+}
+
+func (f *FakeScannerForTesting) ScanExists(ctx context.Context, scanID string) (bool, error) {
+	_, ok := f.findings[scanID]
+	return ok, nil
+}
+
+func (f *FakeScannerForTesting) InsertScan(ctx context.Context, scanID string, toolName string) error {
+	if _, ok := f.findings[scanID]; !ok {
+		f.findings[scanID] = []model.Finding{}
+	}
+	return nil
+}
+
+func (f *FakeScannerForTesting) InsertFindings(ctx context.Context, findings []model.Finding) (int, error) {
+	// For testing purposes, just append all findings
+	for _, finding := range findings {
+		f.findings[finding.ScanID] = append(f.findings[finding.ScanID], finding)
+	}
+	return len(findings), nil
+}
+
+func (f *FakeScannerForTesting) ListAllFindingsByScan(ctx context.Context, scanID string) ([]model.Finding, error) {
+	findings, ok := f.findings[scanID]
+	if !ok {
+		return []model.Finding{}, nil
+	}
+	return findings, nil
+}
+
+func (f *FakeScannerForTesting) ReplaceDedupeResults(ctx context.Context, scanID string, findings []model.Finding) error {
+	f.findings[scanID] = findings
+	return nil
+}
+
+func (f *FakeScannerForTesting) LoadFindings(scanID string, findings []model.Finding) {
+	f.findings[scanID] = findings
+}
+
+// TestDedupeScan_Idempotence verifies that calling DedupeScan twice on the same scan
+// produces identical results (case 3 from requirements).
+func TestDedupeScan_Idempotence(t *testing.T) {
+	findings := []model.Finding{
+		{
+			ID:          "f1",
+			ScanID:      "scan-idempotence",
+			Source:      "trivy",
+			Severity:    "high",
+			File:        "app.go",
+			Line:        42,
+			CVE:         "CVE-2024-1234",
+			Description: "SQL injection",
+			CreatedAt:   time.Now(),
+		},
+		{
+			ID:          "f2",
+			ScanID:      "scan-idempotence",
+			Source:      "semgrep",
+			Severity:    "high",
+			File:        "app.go",
+			Line:        42,
+			CVE:         "CVE-2024-1234",
+			Description: "SQL injection",
+			CreatedAt:   time.Now(),
+		},
+		{
+			ID:          "f3",
+			ScanID:      "scan-idempotence",
+			Source:      "zap",
+			Severity:    "medium",
+			File:        "db.go",
+			Line:        100,
+			CVE:         "CVE-2024-5678",
+			Description: "XSS flaw",
+			CreatedAt:   time.Now(),
+		},
+	}
+
+	fake := NewFakeScannerForTesting()
+	fake.LoadFindings("scan-idempotence", findings)
+
+	ctx := context.Background()
+
+	// First call to DedupeScan
+	stats1, err := DedupeScan(ctx, fake, "scan-idempotence")
+	if err != nil {
+		t.Fatalf("first DedupeScan failed: %v", err)
+	}
+
+	// Get findings after first DedupeScan
+	results1, err := fake.ListAllFindingsByScan(ctx, "scan-idempotence")
+	if err != nil {
+		t.Fatalf("failed to list findings after first DedupeScan: %v", err)
+	}
+
+	// Second call to DedupeScan on same scan
+	stats2, err := DedupeScan(ctx, fake, "scan-idempotence")
+	if err != nil {
+		t.Fatalf("second DedupeScan failed: %v", err)
+	}
+
+	// Get findings after second DedupeScan
+	results2, err := fake.ListAllFindingsByScan(ctx, "scan-idempotence")
+	if err != nil {
+		t.Fatalf("failed to list findings after second DedupeScan: %v", err)
+	}
+
+	// Stats should be identical
+	if stats1.TotalFindings != stats2.TotalFindings {
+		t.Errorf("TotalFindings differ: first %d, second %d", stats1.TotalFindings, stats2.TotalFindings)
+	}
+	if stats1.GroupsCreated != stats2.GroupsCreated {
+		t.Errorf("GroupsCreated differ: first %d, second %d", stats1.GroupsCreated, stats2.GroupsCreated)
+	}
+	if stats1.CanonicalFindings != stats2.CanonicalFindings {
+		t.Errorf("CanonicalFindings differ: first %d, second %d", stats1.CanonicalFindings, stats2.CanonicalFindings)
+	}
+	if stats1.DuplicatesRemoved != stats2.DuplicatesRemoved {
+		t.Errorf("DuplicatesRemoved differ: first %d, second %d", stats1.DuplicatesRemoved, stats2.DuplicatesRemoved)
+	}
+
+	// Findings should be identical (same dedupe groups and canonical flags)
+	if len(results1) != len(results2) {
+		t.Errorf("Finding count differs: first %d, second %d", len(results1), len(results2))
+	}
+
+	for i := range results1 {
+		if results1[i].DedupeGroupID != results2[i].DedupeGroupID {
+			t.Errorf("Finding %d DedupeGroupID differs: first %q, second %q", i, results1[i].DedupeGroupID, results2[i].DedupeGroupID)
+		}
+		if results1[i].IsCanonical != results2[i].IsCanonical {
+			t.Errorf("Finding %d IsCanonical differs: first %v, second %v", i, results1[i].IsCanonical, results2[i].IsCanonical)
+		}
 	}
 }
