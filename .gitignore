@@ -35,3 +35,10 @@ go.work.sum
 
 orchestrator/orchestrator
 *.exe
+
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
