@@ -31,5 +31,27 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  llm-service:
+    build:
+      context: ..
+      dockerfile: llm-service/Dockerfile
+    container_name: vulntriage-llm-service
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_TIMEOUT_SECONDS: 30
+      LLM_MAX_RETRIES: 1
+      MAX_CONTEXT_CHARS: 8000
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
 volumes:
   postgres_data:

@@ -1,0 +1,16 @@
+{
+  "finding": {
+    "id": "finding-sql-injection-01",
+    "source": "semgrep",
+    "severity": "high",
+    "file": "app/api.py",
+    "line": 42,
+    "cwe": "CWE-89",
+    "cve": "CVE-2024-5678",
+    "description": "SQL injection vulnerability: untrusted user input concatenated into SQL query without parameterization"
+  },
+  "context": {
+    "code_snippet": "def get_user(user_id):\n    query = f\"SELECT * FROM users WHERE id = {user_id}\"\n    return db.execute(query)\n",
+    "dependency_usage": "SQLAlchemy==1.4.46 (vulnerable version, CVE-2024-5678 affects this release)"
+  }
+}
