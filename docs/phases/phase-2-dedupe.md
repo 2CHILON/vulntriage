@@ -4,6 +4,15 @@
 
 Phase 2 implements deduplication logic to identify and merge duplicate findings from multiple scanners. When multiple security scanners report the same vulnerability, VulnTriage groups them together, selects a canonical finding, and marks duplicates for reference.
 
+## Phase 2b: Dedupe Fix (Finding ID Collisions & Cross-Upload Dedup)
+
+**New in Phase 2b:**
+- **Stable hash-based IDs**: Finding IDs are now generated using SHA256 hash of (scan_id, source, ruleId, file, line, column, message) to prevent collisions from different scanners reporting the same issue.
+- **Ordinal suffix for within-upload collisions**: If two findings produce identical hash within the same upload, the second gets a `-1` suffix, third `-2`, etc., ensuring no data loss.
+- **DedupeScan() function**: Redeplicates an entire scan (all findings across all uploads) in one transaction. Safe to call repeatedly and produces identical results.
+- **POST /api/v1/scans/{id}/dedupe endpoint**: Allows manual re-deduplication of a specific scan.
+- **skipped_existing in response**: Upload endpoint now reports how many findings were skipped due to existing IDs (aids debugging of duplicate uploads).
+
 ## Architecture
 
 ### Deduplication Flow
@@ -11,51 +20,68 @@ Phase 2 implements deduplication logic to identify and merge duplicate findings 
 ```
 Parsed Findings
       ↓
-Deduplicator (groups by strategy)
+Generate stable hash IDs (with ordinal suffix for collisions)
+      ↓
+Store in database (respects ON CONFLICT DO NOTHING)
+      ↓
+DedupeScan: load ALL findings for scan
+      ↓
+Deduplicator (groups by strategy across entire scan)
       ↓
 Groups of duplicate findings
       ↓
 Canonical finding selection (highest priority)
       ↓
-Mark findings with group ID & canonical flag
-      ↓
-Store in database
+Mark findings & update dedupe_groups table (one transaction)
 ```
 
 ### Core Components
 
-1. **Strategies** (`internal/dedupe/strategies.go`)
+1. **Parsers** (`internal/parsers/sarif.go`)
+   - `generateStableID()`: SHA256 hash of all distinguishing fields with ordinal collision suffix
+
+2. **Strategies** (`internal/dedupe/strategies.go`)
    - `ExactMatchStrategy`: Identical file, line, and description
    - `LocationAndCVEStrategy`: Same location and shared CVE/CWE
    - `CVEOnlyStrategy`: Same CVE identifier across different files
    - `CWEOnlyStrategy`: Same CWE at same location
    - `DefaultStrategy`: Combines multiple strategies in order
 
-2. **Deduplicator** (`internal/dedupe/dedupe.go`)
+3. **Deduplicator** (`internal/dedupe/dedupe.go`)
    - `Dedup()`: Groups findings into clusters
    - `selectRepresentative()`: Chooses canonical finding per group
    - `Mark()`: Applies dedupe metadata to findings
    - `GetStats()`: Returns deduplication statistics
 
-3. **Data Model** (`internal/model/finding.go`)
+4. **DedupeScan** (`internal/dedupe/scanner.go`)
+   - `DedupeScan(ctx, scanner, scanID)`: Re-deduplicates entire scan atomically
+   - `Scanner` interface: Minimal interface to avoid import cycles (testable with fake Store)
+
+5. **Data Model** (`internal/model/finding.go`)
    - `DedupeGroupID`: Cluster identifier
    - `IsCanonical`: Whether this is the representative finding
    - `DedupeReason`: Why it was marked as duplicate
 
-4. **Database** (`internal/store/store.go`)
-   - `UpdateFindingDedup()`: Updates dedupe fields
-   - `ListCanonicalFindings()`: Returns only canonical findings
-   - Schema updates in `002_dedupe.sql`
+6. **Database** (`internal/store/store.go`)
+   - `ScanExists()`: Check if scan exists (for 404 handling)
+   - `ListAllFindingsByScan()`: Get all findings for a scan
+   - `ReplaceDedupeResults()`: Atomically update dedupe metadata and clear dedupe_groups (one transaction)
+   - `InsertFindings()`: Returns count of inserted rows (tracks skipped_existing)
+   - Schema in `002_dedupe.sql`
 
 ## Workflow Integration
 
-The orchestrator's `/api/v1/scans` endpoint now:
+The orchestrator's `/api/v1/scans` endpoint:
 
-1. Parses scanner output (SARIF format)
-2. **Runs deduplication** on the parsed findings
-3. Marks findings with group and canonical status
-4. Stores findings with dedupe metadata
-5. Returns dedup statistics in the response
+1. Parses scanner output (SARIF format) with stable hash IDs
+2. Stores findings (may skip existing IDs)
+3. Calls `DedupeScan()` to re-deduplicate entire scan
+4. Returns stats including `skipped_existing`
+
+New endpoint `/api/v1/scans/{id}/dedupe` (POST):
+- Calls `DedupeScan()` on existing scan
+- Returns 404 if scan not found
+- Safe to call repeatedly (idempotent)
 
 ### Example Request/Response
 
@@ -73,9 +99,25 @@ curl -X POST http://localhost:8080/api/v1/scans \
 {
   "scan_id": "scan-20241121",
   "findings_stored": 15,
-  "total_findings": 15,
+  "skipped_existing": 2,
+  "total_findings": 17,
   "dedupe_groups": 12,
-  "duplicates_removed": 3,
+  "duplicates_removed": 5,
+  "canonical_findings": 12
+}
+```
+
+Manual dedupe:
+```bash
+curl -X POST http://localhost:8080/api/v1/scans/scan-20241121/dedupe
+```
+
+```json
+{
+  "scan_id": "scan-20241121",
+  "total_findings": 17,
+  "dedupe_groups": 12,
+  "duplicates_removed": 5,
   "canonical_findings": 12
 }
 ```
