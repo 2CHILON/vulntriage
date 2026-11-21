@@ -8,11 +8,11 @@ import (
 
 // Group represents a cluster of duplicate findings.
 type Group struct {
-	ID                      string
-	Findings                []*model.Finding
-	Representative          *model.Finding
-	StrategyUsed            string
-	DeduplicatedCount       int
+	ID                string
+	Findings          []*model.Finding
+	Representative    *model.Finding
+	StrategyUsed      string
+	DeduplicatedCount int
 }
 
 // Deduplicator groups findings and assigns canonical records.
@@ -168,8 +168,8 @@ func (d *Deduplicator) Mark(findings []*model.Finding, groups []*Group) {
 
 // Stats provides deduplication statistics.
 type Stats struct {
-	TotalFindings    int
-	GroupsCreated    int
+	TotalFindings     int
+	GroupsCreated     int
 	DuplicatesRemoved int
 	CanonicalFindings int
 }
@@ -187,7 +187,7 @@ func GetStats(groups []*Group) Stats {
 	return Stats{
 		TotalFindings:     totalFindings,
 		GroupsCreated:     len(groups),
-		DuplicatesRemoved:  duplicatesRemoved,
+		DuplicatesRemoved: duplicatesRemoved,
 		CanonicalFindings: len(groups),
 	}
 }
