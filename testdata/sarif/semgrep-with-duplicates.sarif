@@ -1,0 +1,87 @@
+{
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "semgrep",
+          "rules": [
+            {
+              "id": "CVE-2024-1234",
+              "name": "SQL Injection",
+              "shortDescription": {
+                "text": "SQL injection vulnerability"
+              },
+              "fullDescription": {
+                "text": "SQL injection vulnerability in query builder"
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "high"
+              }
+            },
+            {
+              "id": "CUSTOM-XSS-001",
+              "name": "XSS Detection",
+              "shortDescription": {
+                "text": "Cross-site scripting vulnerability"
+              },
+              "fullDescription": {
+                "text": "XSS vulnerability in template rendering"
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "security-severity": "high",
+                "cwe": "CWE-79"
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "CVE-2024-1234",
+          "message": {
+            "text": "SQL injection in query"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app/db.go"
+                },
+                "region": {
+                  "startLine": 42,
+                  "endLine": 42
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "CUSTOM-XSS-001",
+          "message": {
+            "text": "XSS in template rendering"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app/template.go"
+                },
+                "region": {
+                  "startLine": 100,
+                  "endLine": 100
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
