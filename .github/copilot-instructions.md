@@ -26,6 +26,9 @@ code context, scores them, and opens GitHub issues.
      conventional-commit format, (c) a PR title, (d) a PR description with summary,
      how to test, and the checklist.
 
+9. Never create compiled binaries in the repo. Verify with `go vet ./...` and `go test ./...`.
+   If a build check is truly needed: `go build -o /dev/null ./cmd/orchestrator`
+   (in PowerShell use `-o NUL`). Never run a plain `go build` or `go install` here.
 ## Security rules
 - Never hardcode secrets. Read from environment variables. Keep `.env.example` updated.
 - Never log API keys, tokens or code context in full.

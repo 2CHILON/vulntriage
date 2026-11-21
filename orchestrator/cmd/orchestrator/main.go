@@ -14,6 +14,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/2CHILON/vulntriage/orchestrator/internal/dedupe"
+	"github.com/2CHILON/vulntriage/orchestrator/internal/model"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/parsers"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/store"
 )
@@ -129,6 +131,15 @@ func handleScanUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Deduplicate findings
+	deduplicator := dedupe.NewDefaultDeduplicator()
+	findingPtrs := make([]*model.Finding, len(findings))
+	for i := range findings {
+		findingPtrs[i] = &findings[i]
+	}
+	groups := deduplicator.Dedup(findingPtrs)
+	deduplicator.Mark(findingPtrs, groups)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -143,17 +154,23 @@ func handleScanUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Store findings
+	// Store findings (now with dedupe data)
 	if err := storeInstance.InsertFindings(ctx, findings); err != nil {
 		log.Printf("failed to insert findings: %v", err)
 		http.Error(w, "failed to store findings", http.StatusInternalServerError)
 		return
 	}
 
+	stats := dedupe.GetStats(groups)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"scan_id":         req.ScanID,
-		"findings_stored": len(findings),
+		"scan_id":           req.ScanID,
+		"findings_stored":   len(findings),
+		"total_findings":    stats.TotalFindings,
+		"dedupe_groups":     stats.GroupsCreated,
+		"duplicates_removed": stats.DuplicatesRemoved,
+		"canonical_findings": stats.CanonicalFindings,
 	})
 }
