@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/2CHILON/vulntriage/orchestrator/internal/api"
+	"github.com/2CHILON/vulntriage/orchestrator/internal/contextbuilder"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/store"
 )
 
@@ -39,8 +41,25 @@ func main() {
 
 	storeInstance := store.NewStore(pool)
 
+	// Build context builder from environment
+	sourceRoot := os.Getenv("SOURCE_ROOT")
+	contextLines := 20
+	if cl, err := strconv.Atoi(os.Getenv("CONTEXT_LINES")); err == nil && cl > 0 {
+		contextLines = cl
+	}
+
+	cfg := contextbuilder.Config{
+		SourceRoot:      sourceRoot,
+		ContextLines:    contextLines,
+		MaxContextChars: 8000,
+		MaxFileBytes:    1048576,
+		MaxFilesScanned: 5000,
+	}
+
+	builder := contextbuilder.NewBuilder(cfg)
+
 	// Create handlers with dependency injection
-	handlers := api.NewHandler(storeInstance)
+	handlers := api.NewHandlerWithBuilder(storeInstance, builder)
 
 	http.HandleFunc("/health", handleHealth)
 	http.HandleFunc("/api/v1/scans", handlers.HandleScansRouter)
