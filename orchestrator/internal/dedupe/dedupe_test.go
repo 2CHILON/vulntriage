@@ -383,6 +383,17 @@ func (f *FakeScannerForTesting) ReplaceDedupeResults(ctx context.Context, scanID
 	return nil
 }
 
+func (f *FakeScannerForTesting) GetFinding(ctx context.Context, findingID string) (*model.Finding, error) {
+	for _, findings := range f.findings {
+		for i := range findings {
+			if findings[i].ID == findingID {
+				return &findings[i], nil
+			}
+		}
+	}
+	return nil, nil
+}
+
 func (f *FakeScannerForTesting) LoadFindings(scanID string, findings []model.Finding) {
 	f.findings[scanID] = findings
 }

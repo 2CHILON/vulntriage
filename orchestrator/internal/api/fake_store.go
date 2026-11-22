@@ -78,3 +78,18 @@ func (fs *FakeStore) ScanExists(ctx context.Context, scanID string) (bool, error
 	defer fs.mu.Unlock()
 	return fs.scans[scanID], nil
 }
+
+// GetFinding retrieves a single finding by ID.
+func (fs *FakeStore) GetFinding(ctx context.Context, findingID string) (*model.Finding, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	for _, findings := range fs.findings {
+		for i := range findings {
+			if findings[i].ID == findingID {
+				return &findings[i], nil
+			}
+		}
+	}
+	return nil, nil // Not found
+}
