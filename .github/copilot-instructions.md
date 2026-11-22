@@ -29,6 +29,7 @@ code context, scores them, and opens GitHub issues.
 9. Never create compiled binaries in the repo. Verify with `go vet ./...` and `go test ./...`.
    If a build check is truly needed: `go build -o /dev/null ./cmd/orchestrator`
    (in PowerShell use `-o NUL`). Never run a plain `go build` or `go install` here.
+10. Never open whole fixture files in testdata/ (they are large). Inspect them with a command that prints a few lines only.
 ## Security rules
 - Never hardcode secrets. Read from environment variables. Keep `.env.example` updated.
 - Never log API keys, tokens or code context in full.
