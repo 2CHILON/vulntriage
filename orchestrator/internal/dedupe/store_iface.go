@@ -18,6 +18,8 @@ type FindingStore interface {
 	InsertFindings(ctx context.Context, findings []model.Finding) (int, error)
 	// ListAllFindingsByScan retrieves all findings for a scan.
 	ListAllFindingsByScan(ctx context.Context, scanID string) ([]model.Finding, error)
+	// GetFinding retrieves a single finding by ID.
+	GetFinding(ctx context.Context, findingID string) (*model.Finding, error)
 	// ReplaceDedupeResults atomically updates all dedupe metadata and groups for a scan.
 	ReplaceDedupeResults(ctx context.Context, scanID string, findings []model.Finding) error
 }
