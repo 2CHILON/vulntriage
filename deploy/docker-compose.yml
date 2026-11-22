@@ -24,8 +24,12 @@ services:
     container_name: vulntriage-orchestrator
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/vulntriage
+      SOURCE_ROOT: /src
+      CONTEXT_LINES: ${CONTEXT_LINES:-20}
     ports:
       - "8080:8080"
+    volumes:
+      - ${SOURCE_DIR:-../testdata/sample-repo}:/src:ro
     depends_on:
       postgres:
         condition: service_healthy
