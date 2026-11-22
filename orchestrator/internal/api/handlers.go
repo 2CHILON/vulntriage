@@ -10,18 +10,25 @@ import (
 	"strings"
 	"time"
 
+	"github.com/2CHILON/vulntriage/orchestrator/internal/contextbuilder"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/dedupe"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/parsers"
 )
 
-// Handler holds the store dependency for all HTTP handlers.
+// Handler holds the store dependency and context builder for all HTTP handlers.
 type Handler struct {
-	store dedupe.FindingStore
+	store   dedupe.FindingStore
+	builder *contextbuilder.Builder
 }
 
 // NewHandler creates a new Handler with the given FindingStore.
 func NewHandler(store dedupe.FindingStore) *Handler {
 	return &Handler{store: store}
+}
+
+// NewHandlerWithBuilder creates a Handler with a FindingStore and ContextBuilder.
+func NewHandlerWithBuilder(store dedupe.FindingStore, builder *contextbuilder.Builder) *Handler {
+	return &Handler{store: store, builder: builder}
 }
 
 // ScanUploadRequest represents the JSON payload for uploading a SARIF scan.
@@ -163,6 +170,74 @@ func (h *Handler) HandleScanDedupe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// HandleFindingContext handles GET /api/v1/scans/{scanID}/findings/{findingID}/context
+func (h *Handler) HandleFindingContext(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract scanID and findingID from path
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/scans/"), "/")
+	if len(parts) < 4 || parts[1] != "findings" || parts[3] != "context" {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
+	scanID := parts[0]
+	findingID := parts[2]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Check if scan exists
+	exists, err := h.store.ScanExists(ctx, scanID)
+	if err != nil {
+		log.Printf("failed to check scan existence: %v", err)
+		http.Error(w, "failed to check scan", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "scan not found", http.StatusNotFound)
+		return
+	}
+
+	// Get finding by ID
+	finding, err := h.store.GetFinding(ctx, findingID)
+	if err != nil {
+		log.Printf("failed to get finding: %v", err)
+		http.Error(w, "failed to get finding", http.StatusInternalServerError)
+		return
+	}
+	if finding == nil {
+		http.Error(w, "finding not found", http.StatusNotFound)
+		return
+	}
+
+	// Verify the finding belongs to this scan
+	if finding.ScanID != scanID {
+		http.Error(w, "finding not found in this scan", http.StatusNotFound)
+		return
+	}
+
+	// Build context
+	var context contextbuilder.Context
+	if h.builder != nil {
+		context = h.builder.Build(*finding)
+	} else {
+		// No builder configured, return Kind "none"
+		context = contextbuilder.Context{
+			FindingID:      finding.ID,
+			Kind:           "none",
+			WithheldReason: "context builder not configured",
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(context)
+}
+
 // HandleScansRouter routes /api/v1/scans* requests to the appropriate handler.
 func (h *Handler) HandleScansRouter(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
@@ -171,8 +246,14 @@ func (h *Handler) HandleScansRouter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if it's a dedupe request: /api/v1/scans/{id}/dedupe
+	// Check if it's a context request: /api/v1/scans/{id}/findings/{id}/context
 	parts := strings.Split(strings.TrimPrefix(path, "/api/v1/scans/"), "/")
+	if len(parts) >= 4 && parts[1] == "findings" && parts[3] == "context" {
+		h.HandleFindingContext(w, r)
+		return
+	}
+
+	// Check if it's a dedupe request: /api/v1/scans/{id}/dedupe
 	if len(parts) >= 2 && parts[len(parts)-1] == "dedupe" {
 		h.HandleScanDedupe(w, r)
 		return
