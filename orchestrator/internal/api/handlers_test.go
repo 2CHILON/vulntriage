@@ -239,3 +239,4 @@ func TestHandleScanDedupe_Unknown404(t *testing.T) {
 		t.Errorf("expected 'scan not found' in response, got %s", string(body))
 	}
 }
+
