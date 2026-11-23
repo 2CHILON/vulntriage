@@ -10,15 +10,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/2CHILON/vulntriage/orchestrator/internal/analysis"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/contextbuilder"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/dedupe"
+	"github.com/2CHILON/vulntriage/orchestrator/internal/llmclient"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/parsers"
 )
 
 // Handler holds the store dependency and context builder for all HTTP handlers.
 type Handler struct {
-	store   dedupe.FindingStore
-	builder *contextbuilder.Builder
+	store            dedupe.FindingStore
+	builder          *contextbuilder.Builder
+	analysisService  *analysis.Service
+	llmClient        *llmclient.Client
+	analysisTimeout  time.Duration
 }
 
 // NewHandler creates a new Handler with the given FindingStore.
@@ -29,6 +34,17 @@ func NewHandler(store dedupe.FindingStore) *Handler {
 // NewHandlerWithBuilder creates a Handler with a FindingStore and ContextBuilder.
 func NewHandlerWithBuilder(store dedupe.FindingStore, builder *contextbuilder.Builder) *Handler {
 	return &Handler{store: store, builder: builder}
+}
+
+// NewHandlerFull creates a Handler with all dependencies for analysis.
+func NewHandlerFull(store dedupe.FindingStore, builder *contextbuilder.Builder, analysisSvc *analysis.Service, llm *llmclient.Client, timeout time.Duration) *Handler {
+	return &Handler{
+		store:           store,
+		builder:         builder,
+		analysisService: analysisSvc,
+		llmClient:       llm,
+		analysisTimeout: timeout,
+	}
 }
 
 // ScanUploadRequest represents the JSON payload for uploading a SARIF scan.
@@ -238,7 +254,161 @@ func (h *Handler) HandleFindingContext(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(context)
 }
 
-// HandleScansRouter routes /api/v1/scans* requests to the appropriate handler.
+// HandleAnalyzeScan handles POST /api/v1/scans/{id}/analyze
+func (h *Handler) HandleAnalyzeScan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.analysisService == nil {
+		http.Error(w, "analysis service not configured", http.StatusInternalServerError)
+		return
+	}
+
+	// Extract scan_id from path
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/scans/"), "/")
+	if len(parts) < 2 || parts[1] != "analyze" {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	scanID := parts[0]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Check if scan exists
+	exists, err := h.store.ScanExists(ctx, scanID)
+	if err != nil {
+		log.Printf("failed to check scan existence: %v", err)
+		http.Error(w, "failed to check scan", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "scan not found", http.StatusNotFound)
+		return
+	}
+
+	// Check LLM health before starting work
+	if err := h.llmClient.Health(ctx); err != nil {
+		log.Printf("LLM service health check failed: %v", err)
+		http.Error(w, "LLM service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse force parameter
+	force := r.URL.Query().Get("force") == "true"
+
+	// Extend write deadline for long-running analysis
+	ctrl := http.NewResponseController(w)
+	if err := ctrl.SetWriteDeadline(time.Now().Add(h.analysisTimeout + 15*time.Second)); err != nil {
+		log.Printf("warning: failed to extend write deadline: %v (continuing anyway)", err)
+	}
+
+	// Run analysis
+	analysisCtx, cancel := context.WithTimeout(context.Background(), h.analysisTimeout)
+	defer cancel()
+
+	summary, err := h.analysisService.AnalyzeScan(analysisCtx, scanID, analysis.Options{Force: force})
+	if err != nil {
+		log.Printf("analysis failed: %v", err)
+		http.Error(w, "analysis failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(summary)
+}
+
+// HandleListAnalyses handles GET /api/v1/scans/{id}/analyses
+func (h *Handler) HandleListAnalyses(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.analysisService == nil {
+		http.Error(w, "analysis service not configured", http.StatusInternalServerError)
+		return
+	}
+
+	// Extract scan_id from path
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/scans/"), "/")
+	if len(parts) < 2 || parts[1] != "analyses" {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	scanID := parts[0]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Check if scan exists
+	exists, err := h.store.ScanExists(ctx, scanID)
+	if err != nil {
+		log.Printf("failed to check scan existence: %v", err)
+		http.Error(w, "failed to check scan", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "scan not found", http.StatusNotFound)
+		return
+	}
+
+	// TODO: Retrieve analyses once analysis service is implemented
+	// For now, return empty list
+	analyses := []analysis.Analysis{}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(analyses)
+}
+
+// HandleGetAnalysis handles GET /api/v1/scans/{id}/findings/{id}/analysis
+func (h *Handler) HandleGetAnalysis(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.analysisService == nil {
+		http.Error(w, "analysis service not configured", http.StatusInternalServerError)
+		return
+	}
+
+	// Extract scanID and findingID from path: /api/v1/scans/{scanID}/findings/{findingID}/analysis
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/scans/"), "/")
+	if len(parts) < 4 || parts[1] != "findings" || parts[3] != "analysis" {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
+	scanID := parts[0]
+	findingID := parts[2]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Check if scan exists
+	exists, err := h.store.ScanExists(ctx, scanID)
+	if err != nil {
+		log.Printf("failed to check scan existence: %v", err)
+		http.Error(w, "failed to check scan", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "scan not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"finding_id": findingID,
+		"message":    "analysis endpoint placeholder",
+	})
+}
+
 func (h *Handler) HandleScansRouter(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	if path == "/api/v1/scans" || path == "/api/v1/scans/" {
@@ -246,8 +416,34 @@ func (h *Handler) HandleScansRouter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if it's a context request: /api/v1/scans/{id}/findings/{id}/context
+	// Extract parts for routing
 	parts := strings.Split(strings.TrimPrefix(path, "/api/v1/scans/"), "/")
+
+	// Check for /analyses (GET /api/v1/scans/{id}/analyses)
+	if len(parts) >= 2 && parts[1] == "analyses" {
+		h.HandleListAnalyses(w, r)
+		return
+	}
+
+	// Check for /analyze (POST /api/v1/scans/{id}/analyze)
+	if len(parts) >= 2 && parts[1] == "analyze" {
+		h.HandleAnalyzeScan(w, r)
+		return
+	}
+
+	// TODO: Check for findings analysis: /findings/{id}/analysis (needs analysis store)
+	// if len(parts) >= 4 && parts[1] == "findings" && parts[3] == "analysis" {
+	// 	h.HandleGetAnalysis(w, r)
+	// 	return
+	// }
+
+	// Check for findings analysis: /api/v1/scans/{id}/findings/{id}/analysis
+	if len(parts) >= 4 && parts[1] == "findings" && parts[3] == "analysis" {
+		h.HandleGetAnalysis(w, r)
+		return
+	}
+
+	// Check if it's a context request: /api/v1/scans/{id}/findings/{id}/context
 	if len(parts) >= 4 && parts[1] == "findings" && parts[3] == "context" {
 		h.HandleFindingContext(w, r)
 		return
