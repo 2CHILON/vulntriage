@@ -2,17 +2,20 @@ package api
 
 import (
 	"context"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/2CHILON/vulntriage/orchestrator/internal/model"
 )
 
-// FakeStore is an in-memory mock implementation of FindingStore for testing.
+// FakeStore is an in-memory mock implementation of FindingStore and AnalysisStore for testing.
 type FakeStore struct {
 	mu       sync.Mutex
 	scans    map[string]bool            // scanID -> exists
 	findings map[string][]model.Finding // scanID -> findings
 	seenIDs  map[string]bool            // finding ID -> exists (for ON CONFLICT DO NOTHING)
+	analyses map[string]model.Analysis  // finding ID -> current analysis
 }
 
 // NewFakeStore creates a new FakeStore.
@@ -21,6 +24,7 @@ func NewFakeStore() *FakeStore {
 		scans:    make(map[string]bool),
 		findings: make(map[string][]model.Finding),
 		seenIDs:  make(map[string]bool),
+		analyses: make(map[string]model.Analysis),
 	}
 }
 
@@ -92,4 +96,54 @@ func (fs *FakeStore) GetFinding(ctx context.Context, findingID string) (*model.F
 		}
 	}
 	return nil, nil // Not found
+}
+
+// ListCanonicalFindings returns only the canonical findings of a scan.
+func (fs *FakeStore) ListCanonicalFindings(ctx context.Context, scanID string) ([]model.Finding, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	var out []model.Finding
+	for _, f := range fs.findings[scanID] {
+		if f.IsCanonical {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+// UpsertAnalysis stores the single current analysis of a finding.
+func (fs *FakeStore) UpsertAnalysis(ctx context.Context, a model.Analysis) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	a.UpdatedAt = time.Now().UTC()
+	fs.analyses[a.FindingID] = a
+	return nil
+}
+
+// GetAnalysis returns the analysis of a finding, or (nil, nil) when none exists.
+func (fs *FakeStore) GetAnalysis(ctx context.Context, findingID string) (*model.Analysis, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	a, ok := fs.analyses[findingID]
+	if !ok {
+		return nil, nil
+	}
+	return &a, nil
+}
+
+// ListAnalysesByScan returns analyses of the scan's canonical findings, ordered by finding ID.
+func (fs *FakeStore) ListAnalysesByScan(ctx context.Context, scanID string) ([]model.Analysis, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	out := []model.Analysis{}
+	for _, f := range fs.findings[scanID] {
+		if !f.IsCanonical {
+			continue
+		}
+		if a, ok := fs.analyses[f.ID]; ok && a.ScanID == scanID {
+			out = append(out, a)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].FindingID < out[j].FindingID })
+	return out, nil
 }
