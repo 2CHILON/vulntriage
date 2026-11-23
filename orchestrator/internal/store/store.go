@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/2CHILON/vulntriage/orchestrator/internal/analysis"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/model"
 )
 
@@ -263,4 +264,121 @@ func (s *Store) ReplaceDedupeResults(ctx context.Context, scanID string, finding
 	}
 
 	return nil
+}
+
+// Analysis represents a stored analysis result.
+type Analysis struct {
+	FindingID     string
+	ScanID        string
+	Status        string // ok | analysis_failed | skipped
+	Exploitable   *bool
+	Confidence    *float64
+	Priority      *string
+	Reasoning     string
+	SuggestedFix  string
+	Provider      string
+	PromptVersion string
+	Error         string
+}
+
+// UpsertAnalysis stores or updates an analysis result (upsert on finding_id).
+func (s *Store) UpsertAnalysis(ctx context.Context, a *analysis.Analysis) error {
+	query := `
+		INSERT INTO analyses (finding_id, scan_id, status, exploitable, confidence, priority, reasoning, suggested_fix, provider, prompt_version, error, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+		ON CONFLICT (finding_id) DO UPDATE SET
+			status = EXCLUDED.status,
+			exploitable = EXCLUDED.exploitable,
+			confidence = EXCLUDED.confidence,
+			priority = EXCLUDED.priority,
+			reasoning = EXCLUDED.reasoning,
+			suggested_fix = EXCLUDED.suggested_fix,
+			provider = EXCLUDED.provider,
+			prompt_version = EXCLUDED.prompt_version,
+			error = EXCLUDED.error,
+			updated_at = now()
+	`
+	_, err := s.pool.Exec(ctx, query,
+		a.FindingID,
+		a.ScanID,
+		a.Status,
+		a.Exploitable,
+		a.Confidence,
+		a.Priority,
+		a.Reasoning,
+		a.SuggestedFix,
+		a.Provider,
+		a.PromptVersion,
+		a.Error,
+	)
+	return err
+}
+
+// GetAnalysis retrieves an analysis by finding ID.
+func (s *Store) GetAnalysis(ctx context.Context, findingID string) (*analysis.Analysis, error) {
+	query := `
+		SELECT finding_id, scan_id, status, exploitable, confidence, priority, reasoning, suggested_fix, provider, prompt_version, error
+		FROM analyses
+		WHERE finding_id = $1
+	`
+	var a analysis.Analysis
+	err := s.pool.QueryRow(ctx, query, findingID).Scan(
+		&a.FindingID,
+		&a.ScanID,
+		&a.Status,
+		&a.Exploitable,
+		&a.Confidence,
+		&a.Priority,
+		&a.Reasoning,
+		&a.SuggestedFix,
+		&a.Provider,
+		&a.PromptVersion,
+		&a.Error,
+	)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to query analysis: %w", err)
+	}
+	return &a, nil
+}
+
+// ListAnalysesByScan retrieves analyses for a scan (canonical findings only).
+func (s *Store) ListAnalysesByScan(ctx context.Context, scanID string) ([]analysis.Analysis, error) {
+	query := `
+		SELECT a.finding_id, a.scan_id, a.status, a.exploitable, a.confidence, a.priority, a.reasoning, a.suggested_fix, a.provider, a.prompt_version, a.error
+		FROM analyses a
+		JOIN findings f ON a.finding_id = f.id
+		WHERE a.scan_id = $1 AND f.is_canonical = true
+		ORDER BY a.updated_at DESC
+	`
+	rows, err := s.pool.Query(ctx, query, scanID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query analyses: %w", err)
+	}
+	defer rows.Close()
+
+	var results []analysis.Analysis
+	for rows.Next() {
+		var a analysis.Analysis
+		if err := rows.Scan(
+			&a.FindingID,
+			&a.ScanID,
+			&a.Status,
+			&a.Exploitable,
+			&a.Confidence,
+			&a.Priority,
+			&a.Reasoning,
+			&a.SuggestedFix,
+			&a.Provider,
+			&a.PromptVersion,
+			&a.Error,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan analysis row: %w", err)
+		}
+		results = append(results, a)
+	}
+
+	return results, rows.Err()
 }
