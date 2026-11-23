@@ -7,13 +7,16 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/2CHILON/vulntriage/orchestrator/internal/analysis"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/api"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/contextbuilder"
+	"github.com/2CHILON/vulntriage/orchestrator/internal/llmclient"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/store"
 )
 
@@ -58,8 +61,63 @@ func main() {
 
 	builder := contextbuilder.NewBuilder(cfg)
 
-	// Create handlers with dependency injection
-	handlers := api.NewHandlerWithBuilder(storeInstance, builder)
+	// Set up LLM client
+	llmServiceURL := os.Getenv("LLM_SERVICE_URL")
+	if llmServiceURL == "" {
+		llmServiceURL = "http://localhost:8000"
+	}
+
+	llmClientTimeout := 30 * time.Second
+	if timeoutStr := os.Getenv("LLM_CLIENT_TIMEOUT_SECONDS"); timeoutStr != "" {
+		if secs, err := strconv.Atoi(timeoutStr); err == nil && secs > 0 {
+			llmClientTimeout = time.Duration(secs) * time.Second
+		}
+	}
+
+	llmClient := llmclient.NewClient(llmServiceURL, llmClientTimeout)
+
+	// Set up analysis service
+	concurrency := 4
+	if c, err := strconv.Atoi(os.Getenv("ANALYSIS_CONCURRENCY")); err == nil && c > 0 {
+		concurrency = c
+	}
+
+	maxFindings := 100
+	if m, err := strconv.Atoi(os.Getenv("ANALYSIS_MAX_FINDINGS")); err == nil && m > 0 {
+		maxFindings = m
+	}
+
+	minSeverity := "medium"
+	if s := os.Getenv("ANALYSIS_MIN_SEVERITY"); s != "" {
+		minSeverity = strings.ToLower(s)
+	}
+
+	analysisTimeoutSecs := 300
+	if t, err := strconv.Atoi(os.Getenv("ANALYSIS_TIMEOUT_SECONDS")); err == nil && t > 0 {
+		if t > 900 {
+			log.Printf("warning: ANALYSIS_TIMEOUT_SECONDS %d exceeds max 900, using default 300", t)
+		} else {
+			analysisTimeoutSecs = t
+		}
+	}
+	if analysisTimeoutSecs <= 0 || analysisTimeoutSecs > 900 {
+		log.Printf("warning: invalid ANALYSIS_TIMEOUT_SECONDS, using default 300")
+		analysisTimeoutSecs = 300
+	}
+	analysisTimeout := time.Duration(analysisTimeoutSecs) * time.Second
+
+	analysisService := analysis.NewService(
+		storeInstance,
+		builder,
+		llmClient,
+		concurrency,
+		maxFindings,
+		minSeverity,
+		analysisTimeout,
+	)
+
+	// Create handlers with full dependencies
+	handlers := api.NewHandlerFull(storeInstance, builder, analysisService, llmClient, analysisTimeout)
 
 	http.HandleFunc("/health", handleHealth)
 	http.HandleFunc("/api/v1/scans", handlers.HandleScansRouter)

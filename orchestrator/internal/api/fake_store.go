@@ -4,15 +4,17 @@ import (
 	"context"
 	"sync"
 
+	"github.com/2CHILON/vulntriage/orchestrator/internal/analysis"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/model"
 )
 
 // FakeStore is an in-memory mock implementation of FindingStore for testing.
 type FakeStore struct {
-	mu       sync.Mutex
-	scans    map[string]bool            // scanID -> exists
-	findings map[string][]model.Finding // scanID -> findings
-	seenIDs  map[string]bool            // finding ID -> exists (for ON CONFLICT DO NOTHING)
+	mu        sync.Mutex
+	scans     map[string]bool            // scanID -> exists
+	findings  map[string][]model.Finding // scanID -> findings
+	seenIDs   map[string]bool            // finding ID -> exists (for ON CONFLICT DO NOTHING)
+	analyses  map[string]*analysis.Analysis // findingID -> analysis
 }
 
 // NewFakeStore creates a new FakeStore.
@@ -21,6 +23,7 @@ func NewFakeStore() *FakeStore {
 		scans:    make(map[string]bool),
 		findings: make(map[string][]model.Finding),
 		seenIDs:  make(map[string]bool),
+		analyses: make(map[string]*analysis.Analysis),
 	}
 }
 
@@ -92,4 +95,50 @@ func (fs *FakeStore) GetFinding(ctx context.Context, findingID string) (*model.F
 		}
 	}
 	return nil, nil // Not found
+}
+
+// ListCanonicalFindings retrieves canonical findings for a scan.
+func (fs *FakeStore) ListCanonicalFindings(ctx context.Context, scanID string) ([]model.Finding, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	var canonical []model.Finding
+	for _, f := range fs.findings[scanID] {
+		if f.IsCanonical {
+			canonical = append(canonical, f)
+		}
+	}
+	return canonical, nil
+}
+
+// UpsertAnalysis stores or updates an analysis.
+func (fs *FakeStore) UpsertAnalysis(ctx context.Context, a *analysis.Analysis) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.analyses[a.FindingID] = a
+	return nil
+}
+
+// GetAnalysis retrieves an analysis by finding ID.
+func (fs *FakeStore) GetAnalysis(ctx context.Context, findingID string) (*analysis.Analysis, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.analyses[findingID], nil
+}
+
+// ListAnalysesByScan retrieves analyses for a scan (canonical findings only).
+func (fs *FakeStore) ListAnalysesByScan(ctx context.Context, scanID string) ([]analysis.Analysis, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	var result []analysis.Analysis
+	for _, f := range fs.findings[scanID] {
+		if !f.IsCanonical {
+			continue
+		}
+		if a, ok := fs.analyses[f.ID]; ok {
+			result = append(result, *a)
+		}
+	}
+	return result, nil
 }
