@@ -32,6 +32,12 @@ services:
       ANALYSIS_MIN_SEVERITY: medium
       ANALYSIS_MAX_FINDINGS: 100
       ANALYSIS_TIMEOUT_SECONDS: 300
+      SCORE_WEIGHT_SEVERITY: 0.35
+      SCORE_WEIGHT_LLM: 0.35
+      SCORE_WEIGHT_REACHABILITY: 0.20
+      SCORE_WEIGHT_EXPOSURE: 0.10
+      EXPOSURE_CRITICAL_PATHS: ""
+      EXPOSURE_LOW_PATHS: test/,tests/,testdata/,spec/,docs/,examples/
     ports:
       - "8080:8080"
     volumes:
