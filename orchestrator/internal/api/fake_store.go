@@ -6,15 +6,17 @@ import (
 
 	"github.com/2CHILON/vulntriage/orchestrator/internal/analysis"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/model"
+	"github.com/2CHILON/vulntriage/orchestrator/internal/scoring"
 )
 
 // FakeStore is an in-memory mock implementation of FindingStore for testing.
 type FakeStore struct {
-	mu        sync.Mutex
-	scans     map[string]bool            // scanID -> exists
-	findings  map[string][]model.Finding // scanID -> findings
-	seenIDs   map[string]bool            // finding ID -> exists (for ON CONFLICT DO NOTHING)
-	analyses  map[string]*analysis.Analysis // findingID -> analysis
+	mu       sync.Mutex
+	scans    map[string]bool                  // scanID -> exists
+	findings map[string][]model.Finding       // scanID -> findings
+	seenIDs  map[string]bool                  // finding ID -> exists (for ON CONFLICT DO NOTHING)
+	analyses map[string]*analysis.Analysis    // findingID -> analysis
+	scores   map[string][]scoring.StoredScore // scanID -> scores
 }
 
 // NewFakeStore creates a new FakeStore.
@@ -24,6 +26,7 @@ func NewFakeStore() *FakeStore {
 		findings: make(map[string][]model.Finding),
 		seenIDs:  make(map[string]bool),
 		analyses: make(map[string]*analysis.Analysis),
+		scores:   make(map[string][]scoring.StoredScore),
 	}
 }
 
@@ -141,4 +144,53 @@ func (fs *FakeStore) ListAnalysesByScan(ctx context.Context, scanID string) ([]a
 		}
 	}
 	return result, nil
+}
+
+// ListScoresByScan retrieves all scores for a scan.
+func (fs *FakeStore) ListScoresByScan(ctx context.Context, scanID string) ([]scoring.ScoredFinding, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	scores := fs.scores[scanID]
+	findings := fs.findings[scanID]
+
+	// Build a map of finding ID -> finding for quick lookup
+	findingMap := make(map[string]model.Finding)
+	for _, f := range findings {
+		findingMap[f.ID] = f
+	}
+
+	var result []scoring.ScoredFinding
+	for _, score := range scores {
+		f, ok := findingMap[score.FindingID]
+		if !ok {
+			continue
+		}
+
+		result = append(result, scoring.ScoredFinding{
+			FindingID:  score.FindingID,
+			ScanID:     score.ScanID,
+			Score:      score.Score,
+			Priority:   score.Priority,
+			Severity:   f.Severity,
+			Source:     f.Source,
+			File:       f.File,
+			Line:       f.Line,
+			CVE:        f.CVE,
+			CWE:        f.CWE,
+			Breakdown:  score.Breakdown,
+			ComputedAt: "",
+		})
+	}
+
+	return result, nil
+}
+
+// ReplaceScores replaces all scores for a scan.
+func (fs *FakeStore) ReplaceScores(ctx context.Context, scanID string, scores []scoring.StoredScore) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	fs.scores[scanID] = scores
+	return nil
 }
