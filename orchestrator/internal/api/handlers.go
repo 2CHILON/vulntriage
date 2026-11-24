@@ -15,15 +15,17 @@ import (
 	"github.com/2CHILON/vulntriage/orchestrator/internal/dedupe"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/llmclient"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/parsers"
+	"github.com/2CHILON/vulntriage/orchestrator/internal/scoring"
 )
 
 // Handler holds the store dependency and context builder for all HTTP handlers.
 type Handler struct {
-	store            dedupe.FindingStore
-	builder          *contextbuilder.Builder
-	analysisService  *analysis.Service
-	llmClient        *llmclient.Client
-	analysisTimeout  time.Duration
+	store           dedupe.FindingStore
+	builder         *contextbuilder.Builder
+	analysisService *analysis.Service
+	scoringService  *scoring.Service
+	llmClient       *llmclient.Client
+	analysisTimeout time.Duration
 }
 
 // NewHandler creates a new Handler with the given FindingStore.
@@ -36,12 +38,13 @@ func NewHandlerWithBuilder(store dedupe.FindingStore, builder *contextbuilder.Bu
 	return &Handler{store: store, builder: builder}
 }
 
-// NewHandlerFull creates a Handler with all dependencies for analysis.
-func NewHandlerFull(store dedupe.FindingStore, builder *contextbuilder.Builder, analysisSvc *analysis.Service, llm *llmclient.Client, timeout time.Duration) *Handler {
+// NewHandlerFull creates a Handler with all dependencies for analysis and scoring.
+func NewHandlerFull(store dedupe.FindingStore, builder *contextbuilder.Builder, analysisSvc *analysis.Service, scoringSvc *scoring.Service, llm *llmclient.Client, timeout time.Duration) *Handler {
 	return &Handler{
 		store:           store,
 		builder:         builder,
 		analysisService: analysisSvc,
+		scoringService:  scoringSvc,
 		llmClient:       llm,
 		analysisTimeout: timeout,
 	}
@@ -254,6 +257,111 @@ func (h *Handler) HandleFindingContext(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(context)
 }
 
+// HandleScoreScan handles POST /api/v1/scans/{id}/score
+func (h *Handler) HandleScoreScan(w http.ResponseWriter, r *http.Request) {
+	if h.scoringService == nil {
+		http.Error(w, "scoring service not configured", http.StatusInternalServerError)
+		return
+	}
+
+	// Extract scan_id from path
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/scans/"), "/")
+	if len(parts) < 2 || parts[1] != "score" {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	scanID := parts[0]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Check if scan exists
+	exists, err := h.store.ScanExists(ctx, scanID)
+	if err != nil {
+		log.Printf("failed to check scan existence: %v", err)
+		http.Error(w, "failed to check scan", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "scan not found", http.StatusNotFound)
+		return
+	}
+
+	// Run scoring
+	summary, err := h.scoringService.ScoreScan(ctx, scanID)
+	if err != nil {
+		log.Printf("scoring failed: %v", err)
+		http.Error(w, "scoring failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(summary)
+}
+
+// HandleListScores handles GET /api/v1/scans/{id}/scores
+func (h *Handler) HandleListScores(w http.ResponseWriter, r *http.Request) {
+	if h.scoringService == nil {
+		http.Error(w, "scoring service not configured", http.StatusInternalServerError)
+		return
+	}
+
+	// Extract scan_id from path
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/scans/"), "/")
+	if len(parts) < 2 || parts[1] != "scores" {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	scanID := parts[0]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Check if scan exists
+	exists, err := h.store.ScanExists(ctx, scanID)
+	if err != nil {
+		log.Printf("failed to check scan existence: %v", err)
+		http.Error(w, "failed to check scan", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "scan not found", http.StatusNotFound)
+		return
+	}
+
+	// List scores from the scoring service
+	scores, err := h.scoringService.ListScores(ctx, scanID)
+	if err != nil {
+		log.Printf("failed to list scores: %v", err)
+		http.Error(w, "failed to list scores", http.StatusInternalServerError)
+		return
+	}
+
+	// Convert to output format (never include snippet or reasoning fields)
+	var output []map[string]interface{}
+	for _, s := range scores {
+		item := map[string]interface{}{
+			"finding_id":  s.FindingID,
+			"score":       s.Score,
+			"priority":    s.Priority,
+			"severity":    s.Severity,
+			"source":      s.Source,
+			"file":        s.File,
+			"line":        s.Line,
+			"cve":         s.CVE,
+			"cwe":         s.CWE,
+			"breakdown":   s.Breakdown,
+			"computed_at": s.ComputedAt,
+		}
+		output = append(output, item)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(output)
+}
+
 // HandleAnalyzeScan handles POST /api/v1/scans/{id}/analyze
 func (h *Handler) HandleAnalyzeScan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -428,6 +536,18 @@ func (h *Handler) HandleScansRouter(w http.ResponseWriter, r *http.Request) {
 	// Check for /analyze (POST /api/v1/scans/{id}/analyze)
 	if len(parts) >= 2 && parts[1] == "analyze" {
 		h.HandleAnalyzeScan(w, r)
+		return
+	}
+
+	// Check for /score (POST /api/v1/scans/{id}/score)
+	if len(parts) >= 2 && parts[1] == "score" && r.Method == http.MethodPost {
+		h.HandleScoreScan(w, r)
+		return
+	}
+
+	// Check for /scores (GET /api/v1/scans/{id}/scores)
+	if len(parts) >= 2 && parts[1] == "scores" && r.Method == http.MethodGet {
+		h.HandleListScores(w, r)
 		return
 	}
 
