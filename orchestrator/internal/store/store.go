@@ -2,12 +2,14 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/2CHILON/vulntriage/orchestrator/internal/analysis"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/model"
+	"github.com/2CHILON/vulntriage/orchestrator/internal/scoring"
 )
 
 // Store provides access to the Postgres database.
@@ -381,4 +383,126 @@ func (s *Store) ListAnalysesByScan(ctx context.Context, scanID string) ([]analys
 	}
 
 	return results, rows.Err()
+}
+
+// ReplaceScores atomically clears and rewrites all scores for a scan.
+// This stores scores for canonical findings only; previous scores are removed.
+func (s *Store) ReplaceScores(ctx context.Context, scanID string, scores []scoring.StoredScore) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Delete all existing scores for this scan
+	_, err = tx.Exec(ctx, `DELETE FROM finding_scores WHERE scan_id = $1`, scanID)
+	if err != nil {
+		return fmt.Errorf("failed to delete old scores: %w", err)
+	}
+
+	// Insert new scores
+	for _, score := range scores {
+		query := `
+			INSERT INTO finding_scores (finding_id, scan_id, score, priority, breakdown, computed_at)
+			VALUES ($1, $2, $3, $4, $5, now())
+		`
+		breakdownJSON, err := marshalJSON(score.Breakdown)
+		if err != nil {
+			return fmt.Errorf("failed to marshal breakdown: %w", err)
+		}
+
+		_, err = tx.Exec(ctx, query,
+			score.FindingID,
+			score.ScanID,
+			score.Score,
+			score.Priority,
+			breakdownJSON,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to insert score: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// ListScoresByScan retrieves ranked scores for a scan, joined with finding metadata.
+func (s *Store) ListScoresByScan(ctx context.Context, scanID string) ([]scoring.ScoredFinding, error) {
+	query := `
+		SELECT fs.finding_id, fs.scan_id, fs.score, fs.priority, 
+		       f.severity, f.source, f.file, f.line, f.cve, f.cwe, 
+		       fs.breakdown, fs.computed_at
+		FROM finding_scores fs
+		JOIN findings f ON fs.finding_id = f.id
+		WHERE fs.scan_id = $1
+		ORDER BY fs.score DESC, 
+		         CASE f.severity
+		           WHEN 'critical' THEN 4
+		           WHEN 'high' THEN 3
+		           WHEN 'medium' THEN 2
+		           WHEN 'low' THEN 1
+		           ELSE 0
+		         END DESC,
+		         fs.finding_id ASC
+	`
+
+	rows, err := s.pool.Query(ctx, query, scanID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []scoring.ScoredFinding
+	for rows.Next() {
+		var sf scoring.ScoredFinding
+		var breakdown []byte
+		var computedAt interface{}
+
+		if err := rows.Scan(
+			&sf.FindingID,
+			&sf.ScanID,
+			&sf.Score,
+			&sf.Priority,
+			&sf.Severity,
+			&sf.Source,
+			&sf.File,
+			&sf.Line,
+			&sf.CVE,
+			&sf.CWE,
+			&breakdown,
+			&computedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan score row: %w", err)
+		}
+
+		if computedAt != nil {
+			sf.ComputedAt = fmt.Sprint(computedAt)
+		}
+
+		// Parse breakdown JSON
+		if breakdown != nil {
+			var bd interface{}
+			if err := unmarshalJSON(breakdown, &bd); err == nil {
+				sf.Breakdown = bd
+			}
+		}
+
+		results = append(results, sf)
+	}
+
+	return results, rows.Err()
+}
+
+// marshalJSON is a helper to marshal objects to JSON bytes.
+func marshalJSON(v interface{}) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+// unmarshalJSON is a helper to unmarshal JSON bytes to objects.
+func unmarshalJSON(data []byte, v interface{}) error {
+	return json.Unmarshal(data, v)
 }
