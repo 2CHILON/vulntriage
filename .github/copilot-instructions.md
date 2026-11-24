@@ -7,7 +7,7 @@ code context, scores them, and opens GitHub issues.
 
 ## Architecture (do not change without asking)
 - `orchestrator/` – Go. Parsers, dedupe, context builder, Postgres, GitHub issues, HTTP API.
-- `llm-service/` – Python FastAPI. LLM analysis + scoring. Pydantic-validated JSON only.
+- `llm-service/` – Python FastAPI. LLM analysis only. Risk scoring lives in the Go orchestrator (`orchestrator/internal/scoring`).
 - PostgreSQL for findings, triage results, scan history, false-positive feedback.
 - Docker Compose for local dev. GitHub Actions for CI.
 
@@ -63,18 +63,21 @@ vulntriage/
 ├── orchestrator/                 # Go service
 │   ├── cmd/orchestrator/main.go
 │   ├── internal/
+│   │   ├── analysis/             # sends canonical findings to the LLM service, stores analyses
 │   │   ├── api/                  # HTTP handlers
+│   │   ├── contextbuilder/       # code snippet, dependency usage, redaction
+│   │   ├── dedupe/
+│   │   ├── github/               # issue creation (Phase 5b)
+│   │   ├── llmclient/            # HTTP client for the Python LLM service
 │   │   ├── model/                # unified Finding struct
 │   │   ├── parsers/              # sarif, trivy, semgrep, zap, depcheck
-│   │   ├── dedupe/
-│   │   ├── store/                # Postgres access
-│   │   ├── contextbuilder/       # code snippet, dependency usage, redaction
-│   │   └── github/               # issue creation
+│   │   ├── scoring/              # risk scoring (Phase 5a)
+│   │   └── store/                # Postgres access
 │   ├── migrations/
 │   ├── go.mod
 │   └── Dockerfile
-├── llm-service/                  # Python FastAPI
-│   ├── app/{main.py, schemas.py, analyzer.py, scoring.py, prompts/}
+├── llm-service/                  # Python FastAPI (LLM analysis only, no scoring)
+│   ├── app/{main.py, schemas.py, config.py, analyzer.py, providers/, prompts/}
 │   ├── tests/
 │   ├── requirements.txt
 │   └── Dockerfile
