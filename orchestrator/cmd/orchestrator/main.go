@@ -17,6 +17,8 @@ import (
 	"github.com/2CHILON/vulntriage/orchestrator/internal/api"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/contextbuilder"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/llmclient"
+	"github.com/2CHILON/vulntriage/orchestrator/internal/model"
+	"github.com/2CHILON/vulntriage/orchestrator/internal/scoring"
 	"github.com/2CHILON/vulntriage/orchestrator/internal/store"
 )
 
@@ -116,8 +118,24 @@ func main() {
 		analysisTimeout,
 	)
 
+	// Set up scoring service
+	weights := scoring.LoadWeights(os.Getenv)
+	exposureConfig := scoring.LoadExposureConfig(os.Getenv)
+
+	// Create a reachability adapter that uses the builder
+	reachabilityAdapter := &builderReachabilityAdapter{builder: builder}
+
+	scoringService := scoring.NewService(
+		storeInstance,
+		storeInstance,
+		reachabilityAdapter,
+		storeInstance,
+		weights,
+		exposureConfig,
+	)
+
 	// Create handlers with full dependencies
-	handlers := api.NewHandlerFull(storeInstance, builder, analysisService, llmClient, analysisTimeout)
+	handlers := api.NewHandlerFull(storeInstance, builder, analysisService, scoringService, llmClient, analysisTimeout)
 
 	http.HandleFunc("/health", handleHealth)
 	http.HandleFunc("/api/v1/scans", handlers.HandleScansRouter)
@@ -154,4 +172,13 @@ func main() {
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"ok"}`))
+}
+
+// builderReachabilityAdapter adapts the Builder to the ReachabilityProvider interface.
+type builderReachabilityAdapter struct {
+	builder *contextbuilder.Builder
+}
+
+func (a *builderReachabilityAdapter) ReachabilityFor(f model.Finding) (kind string, status string) {
+	return a.builder.ReachabilityFor(f)
 }

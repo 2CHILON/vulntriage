@@ -108,6 +108,34 @@ func (b *Builder) Build(f model.Finding) Context {
 	return ctx
 }
 
+// ReachabilityFor classifies a finding and returns its kind and reachability status.
+// For dependency findings, it returns the import status.
+// For code findings, it always returns "unknown" status and does not read files.
+// If SourceRoot is empty, it returns kind "none" and status "unknown".
+func (b *Builder) ReachabilityFor(f model.Finding) (kind string, status string) {
+	// If SourceRoot is not configured, return kind "none"
+	if b.cfg.SourceRoot == "" {
+		return "none", "unknown"
+	}
+
+	// Classify: check if file is a manifest or lockfile
+	basename := strings.ToLower(filepath.Base(f.File))
+	if isManifestOrLockfile(basename) {
+		// Dependency finding: extract package and check imports
+		pkg, ok := ExtractPackageName(f)
+		if !ok {
+			return "dependency", "unknown"
+		}
+
+		// Find imports
+		reachability := FindImports(b.cfg, pkg)
+		return "dependency", strings.ToLower(reachability.Status)
+	}
+
+	// Code finding: return "unknown" status (no file read)
+	return "code", "unknown"
+}
+
 // isManifestOrLockfile checks if the basename is a package manifest or lockfile.
 func isManifestOrLockfile(basename string) bool {
 	manifests := map[string]bool{
